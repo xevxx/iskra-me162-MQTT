@@ -1,4 +1,4 @@
-#!/usr/bin/python3
+#!/usr/bin/python
 # iskra-me162 Read digital (not smart) meter
 # Release 0.1.0
 # Author l. Lagendijk
@@ -24,6 +24,7 @@ from parse import *
 from parse import compile
 import _thread
 from threading import Timer
+import paho.mqtt.client as mqtt
 
 version = "v5.1 Iskra ME 162 configurable"
 
@@ -35,270 +36,304 @@ config_file = "/etc/default/iskra-me162.config"
 # domoticzpassword = ""
 # print_debug = False
 
+
+#########################################
+# MQTT #
+#########################################
+
+def on_message(client, userdata, message):
+        msg=str(message.payload.decode("utf-8"))
+        #print("message =",msg)
+        topic=message.topic
+        messages.append([topic,msg])
+def on_connect(client, userdata, flags, rc):
+        if rc==0:
+                client.connected_flag=True
+                #client.subscribe(sub_topic)
+        else:
+                client.bad_connection_flag=True
+                client.connected_flag=False
+
+msg_prefix = "meter/me162/"
+broker_address="192.168.10.169"
+client = mqtt.Client("P1")
+#client.connect(broker_address)
+client.on_message=on_message
+client.on_connect=on_connect
+client.connected_flag=False
+
+
 with open(config_file) as config:
-	exec(config.read())
+        exec(config.read())
 
 class MeterReadings:
 
-	def __init__(self, ir_lines):
-		self.time = time.time() 
-		self.serial = self.get_value("C.1.0", ir_lines)
-		self.total_usage = self.get_wh( "1.8.0", ir_lines)
-		self.usage1 = self.get_wh( "1.8.1", ir_lines)
-		self.usage2 = self.get_wh( "1.8.2", ir_lines)
-		self.total_return = self.get_wh( "2.8.1", ir_lines)
-		self.return1 = self.get_wh( "2.8.1", ir_lines)
-		self.return2 = self.get_wh( "2.8.2", ir_lines)
-		self.error = self.get_value( "F.F", ir_lines)
+        def __init__(self, ir_lines):
+                self.time = time.time()
+                self.serial = self.get_value("C.1.0", ir_lines)
+                self.total_usage = self.get_wh( "1.8.0", ir_lines)
+                self.usage1 = self.get_wh( "1.8.1", ir_lines)
+                self.usage2 = self.get_wh( "1.8.2", ir_lines)
+                self.total_return = self.get_wh( "2.8.0", ir_lines)
+                self.return1 = self.get_wh( "2.8.1", ir_lines)
+                self.return2 = self.get_wh( "2.8.2", ir_lines)
+                self.error = self.get_value( "F.F", ir_lines)
 
-	def get_value(self, id, line_array):
-		# for i in range(len(line_array)):
-		
-		parser = compile("{}({})")
-		for line in line_array:
-			if line != "!":
-				result = parser.parse(line)
-				dbg_print(2, "checking %s for %s" %(line, id))
-	
-				if result[0] == id:
-					value_str = result[1]
-					dbg_print (2, "%s = %s kwh" %(id, value_str))
-					return	value_str 
+        def get_value(self, id, line_array):
+                # for i in range(len(line_array)):
 
-	def get_wh(self, id, line_array):
-		value = self.get_value(id, line_array)
-		if value is None:
-			return None
-		kwh = value.replace('*kWh', '')
-		dbg_print (2, "%s = %s kwh" %(id, kwh))
-		wh = float(kwh) * 1000
-		return int(wh)
-    
+                parser = compile("{}({})")
+                for line in line_array:
+                        if line != "!":
+                                result = parser.parse(line)
+
+                                dbg_print(2, "checking %s for %s" %(line, id))
+
+                                if result[0] == id:
+                                        value_str = result[1]
+                                        dbg_print (2, "%s = %s kwh" %(id, value_str))
+                                        return  value_str
+
+        def get_wh(self, id, line_array):
+                value = self.get_value(id, line_array)
+                if value is None:
+                        return None
+                kwh = value.replace('*kWh', '')
+                dbg_print (2, "%s = %s kwh" %(id, kwh))
+                wh = float(kwh) * 1000
+                return int(wh)
 
 def dbg_print(level, *args):
-	if(print_debug >= int(level)):
-		my_args = ' '.join(map(str, args))
-		print(my_args)
+        if(print_debug >= int(level)):
+                my_args = ' '.join(map(str, args))
+                print(my_args)
+
 
 
 #########################################
-# Meter reading routine 
+# Meter reading routine
 #########################################
 
 def do_read_meter():
 
-	#Set initial COM port config
-	ser = serial.Serial()
-	ser.baudrate = 300
-	ser.bytesize = serial.SEVENBITS
-	ser.parity = serial.PARITY_EVEN
-	ser.stopbits = serial.STOPBITS_ONE
-	ser.xonxoff = 0
-	ser.rtscts = 0
-	ser.timeout = 20
+        #Set initial COM port config
+        ser = serial.Serial()
+        ser.baudrate = 300
+        ser.bytesize = serial.SEVENBITS
+        ser.parity = serial.PARITY_EVEN
+        ser.stopbits = serial.STOPBITS_ONE
+        ser.xonxoff = 0
+        ser.rtscts = 0
+        ser.timeout = 20
 
-	ser.port = port
+        ser.port = port
 
-	dbg_print (1, "Open COM port %s at %s baud" % (port, ser.baudrate))
+        dbg_print (1, "Open COM port %s at %s baud" % (port, ser.baudrate))
 
-	ser.open()
+        ser.open()
 
-	#Initialize connection
+        #Initialize connection
 
-	dbg_print (1, "Send initialization: /?<CR><LF>")
-	ir_command = '/?!\x0D\x0A'
-	ser.write(ir_command.encode('utf-8'))
-	ser.flush()
+        dbg_print (1, "Send initialization: /?<CR><LF>")
+        ir_command = '/?!\x0D\x0A'
+        ser.write(ir_command.encode('utf-8'))
+        ser.flush()
 
-	#Wait for initialization confirmation
-	# /[XXX] [Z] MCC [CR] [LF]   /KAM0MCC[CR][LF]
-	# 	XXX is manufacturer string
-	# 	Z is the high baudrate supported
-	#	MCC is the meter model + software version
+        #Wait for initialization confirmation
+        # /[XXX] [Z] MCC [CR] [LF]   /KAM0MCC[CR][LF]
+        #       XXX is manufacturer string
+        #       Z is the high baudrate supported
+        #       MCC is the meter model + software version
 
-	ir_buffer = ''
-	while '/' not in ir_buffer:
-		ir_buffer = str(ser.readline(), "utf-8")
-		if '/?!\x0D\x0A' in ir_buffer:
-			ir_buffer = str(ser.readline(), "utf-8")
+        ir_buffer = ''
+        while '/' not in ir_buffer:
+                ir_buffer = str(ser.readline(), "utf-8")
+                if '/?!\x0D\x0A' in ir_buffer:
+                        ir_buffer = str(ser.readline(), "utf-8")
 
-	dbg_print (1, "Initialization done.")
-
-	if use_highspeed:
-		ir_speed = ir_buffer[4:5]
-	else:
-		ir_speed = 0
-
-	
-	if   ir_speed == '0': 
-		ir_baud = "300"
-	elif ir_speed == '1': 
-		ir_baud = "600"
-	elif ir_speed == '2': 
-		ir_baud = "1200"
-	elif ir_speed == '3': 
-		ir_baud = "2400"
-	elif ir_speed == '4': 
-		ir_baud = "4800"
-	elif ir_speed == '5': 
-		ir_baud = "9600"
-	elif ir_speed == '6': 
-		ir_baud = "19200"
-	else: 
-		# unknown speed, continue to use 300 baud
-		ir_baud  = "300"
-		ir_speed = '0'
-
-	dbg_print (1, "IR-baud = %s" % ir_baud)
+        dbg_print (1, "Initialization done.")
+        if use_highspeed:
+                ir_speed = ir_buffer[4:5]
+        else:
+                ir_speed = 0
 
 
+        if   ir_speed == '0':
+                ir_baud = "300"
+        elif ir_speed == '1':
+                ir_baud = "600"
+        elif ir_speed == '2':
+                ir_baud = "1200"
+        elif ir_speed == '3':
+                ir_baud = "2400"
+        elif ir_speed == '4':
+                ir_baud = "4800"
+        elif ir_speed == '5':
+                ir_baud = "9600"
+        elif ir_speed == '6':
+                ir_baud = "19200"
+        else:
+                # unknown speed, continue to use 300 baud
+                ir_baud  = "300"
+                ir_speed = '0'
 
-	# Acknowledge choosen speed: 
-	# [ACK]0[Z][Y] [CR] [LF]
-	#	Z is the baudrate, take the same value as ir_speed in the previous answer
-	#	Y can be 0 or 1. Value 0 sets the actual meterreading mode, Value 1 sets the programming mode
-	#
+        dbg_print (1, "IR-baud = %s" % ir_baud)
 
-	ir_command='\x06' + '0'+ ir_speed + '0\x0D\x0A'
-	ser.write(ir_command.encode('utf-8'))
-	ser.flush()
-	dbg_print(1, "Sent: <ACK>" + '0' + ir_speed + "0")
 
-	ser.baudrate = ir_baud
 
-	# Wait for data
+        # Acknowledge choosen speed:
+        # [ACK]0[Z][Y] [CR] [LF]
+        #       Z is the baudrate, take the same value as ir_speed in the previous answer
+        #       Y can be 0 or 1. Value 0 sets the actual meterreading mode, Value 1 sets the programming mode
+        #
 
-	ir_buffer = ''
-	ir_lines_index = 0
-	ir_lines = []
+        ir_command='\x06' + '0'+ ir_speed + '0\x0D\x0A'
+        ser.write(ir_command.encode('utf-8'))
+        ser.flush()
+        dbg_print(1, "Sent: <ACK>" + '0' + ir_speed + "0")
 
-	ETX = False
-	while not ETX:
-		ir_buffer = str(ser.readline(), "utf-8")
-		if '\x060' in ir_buffer:
-			ir_buffer = str(ser.readline(), "utf-8")
-		if ir_lines_index == 0:
-			ir_buffer = ir_buffer.lstrip('\x02')
-		ir_lines.extend(ir_buffer.strip().split('\r\n'))
-		ir_lines_index = ir_lines_index + 1
-		if '!' in ir_buffer:
-			ETX = True
+        ser.baudrate = ir_baud        
+        while not ETX:
+                ir_buffer = str(ser.readline(), "utf-8")
+                if '\x060' in ir_buffer:
+                        ir_buffer = str(ser.readline(), "utf-8")
+                if ir_lines_index == 0:
+                        ir_buffer = ir_buffer.lstrip('\x02')
+                ir_lines.extend(ir_buffer.strip().split('\r\n'))
+                ir_lines_index = ir_lines_index + 1
+                if '!' in ir_buffer:
+                        ETX = True
 
-	dbg_print (1, "Datatransfer complete.")
-	dbg_print (1, "Number of received elements: %d" % len(ir_lines))
-	dbg_print (1, "Array of received elements: ")
-	if (print_debug > 0):
-		pprint (ir_lines)
+        dbg_print (1, "Datatransfer complete.")
+        dbg_print (1, "Number of received elements: %d" % len(ir_lines))
+        dbg_print (1, "Array of received elements: ")
+        if (print_debug > 0):
+                pprint (ir_lines)
 
-	# Close port and show status
-	ser.close()
+        # Close port and show status
+        ser.close()
 
-	power_timestamp=datetime.datetime.strftime(datetime.datetime.today(), "%Y-%m-%d %H:%M:%S" )
-	dbg_print (1, "Telegram ontvangen op: %s" % power_timestamp)
+        power_timestamp=datetime.datetime.strftime(datetime.datetime.today(), "%Y-%m-%d %H:%M:%S" )
+        dbg_print (1, "Telegram ontvangen op: %s" % power_timestamp)
 
-	current_readings = MeterReadings(ir_lines)
+        current_readings = MeterReadings(ir_lines)
 
-	return current_readings
+        return current_readings
 
 def dump_previous_readings(instance):
-	
-	try:
-		state = open(state_file, "wb")
-		pickler = pickle.Pickler(state)
-		pickler.dump(instance)
-	except: 
-		# Nothing to do here
-		print("failed to dump readings to state file")	
-		return False
-	return True
+        try:
+                state = open(state_file, "wb")
+                pickler = pickle.Pickler(state)
+                pickler.dump(instance)
+        except:
+                # Nothing to do here
+                print("failed to dump readings to state file")
+                return False
+        return True
 
 def get_previous_readings():
-	try:
-		state = open(state_file, "rb")
-		unpickler = pickle.Unpickler(state)
-		readings = unpickler.load()
-	except:
-		# nothing to do here
-		readings = None
-		print("Failed to read previous readings from state file: is this the first time we are running?")
+        try:
+                state = open(state_file, "rb")
+                unpickler = pickle.Unpickler(state)
+                readings = unpickler.load()
+        except:
+                # nothing to do here
+                readings = None
+                print("Failed to read previous readings from state file: is this the first time we are running?")
 
-	return readings
+        return readings
 
 def read_meter():
-	# limit excution time for the meter reading to 30 seconds.
-	# this will avoid hangings when a read fails
+        # limit excution time for the meter reading to 30 seconds.
+        # this will avoid hangings when a read fails
+        timeout_timer = Timer(30, _thread.interrupt_main)
 
-	timeout_timer = Timer(30, _thread.interrupt_main)
-	
-	try:
-		timeout_timer.start()
-		result = do_read_meter()
-	except KeyboardInterrupt:
-		result = None
-		dbg_print(0, "Meter Reading failed at ", datetime.datetime.strftime(datetime.datetime.today(), "%Y-%m-%d %H:%M:%S"), "will continue")
-	finally:	
-		timeout_timer.cancel()
-	return result
+        try:
+                timeout_timer.start()
+                result = do_read_meter()
+        except KeyboardInterrupt:
+                result = None
+                dbg_print(0, "Meter Reading failed at ", datetime.datetime.strftime(datetime.datetime.today(), "%Y-%m-%d %H:%M:%S"), "will continue")
+        finally:
+                timeout_timer.cancel()
+        return result
 
 def do_work():
-	current_readings = read_meter()
+        current_readings = read_meter()
+        if current_readings is not None:
+                dbg_print(1, "Process new readings")
+                previous_readings = get_previous_readings()
+                client.connect(broker_address)
+                client.loop_start()
+                dbg_print(2,"mqtt connection started")
+                a= 0
+                while 1:
+                        a += 1
+                        if client.connected_flag == True:
+                                dbg_print(2,"connection successful")
+                                if previous_readings is not None:
 
-	if current_readings is not None:
-		dbg_print(1, "Process new readings")
-		previous_readings = get_previous_readings()
+                                        # We need the previous reading to calulate actual consumption and production
+                                        # so if we do not yet have previous readings we skip the domoticz update
 
-		if previous_readings is not None:
+                                        dbg_print(1, "Previous readings found,  update mqtt")
 
-			# We need the previous reading to calulate actual consumption and production
-			# so if we do not yet have previous readings we skip the domoticz update
+                                        interval = current_readings.time - previous_readings.time
+                                        consumption = int((current_readings.total_usage - previous_readings.total_usage) / interval * 3600)
+                                        production = int((current_readings.total_return - current_readings.total_return) / interval * 3600)
 
-			dbg_print(1, "Previous readings found,  update domoticz")
+                                        #client.publish(msg_prefix + "usage1",current_readings.usage1)
+                                        #client.publish(msg_prefix + "usage2",current_readings.usage2)
+                                        #client.publish(msg_prefix + "return1",current_readings.return1)
+                                        #client.publish(msg_prefix + "return2",current_readings.return2)
+                                        client.publish(msg_prefix + "total_usage",current_readings.total_usage/1000)
+                                        client.publish(msg_prefix + "total_return",current_readings.total_return/1000)
+                                        client.publish(msg_prefix + "consumption",consumption/1000)
+                                        client.publish(msg_prefix + "production",production/1000)
+                                else:
+                                        client.publish(msg_prefix + "total_usage",current_readings.total_usage/1000)
+                                        client.publish(msg_prefix + "total_return",current_readings.total_return/1000)
+                                        #client.publish(msg_prefix + "usage1",current_readings.usage1)
+                                        #client.publish(msg_prefix + "usage2",current_readings.usage2)
+                                        #client.publish(msg_prefix + "return1",current_readings.return1)
+                                        #client.publish(msg_prefix + "return2",current_readings.return2)
 
-			interval = current_readings.time - previous_readings.time
-			consumption = int((current_readings.total_usage - previous_readings.total_usage) / interval * 3600)
-			production = int((current_readings.total_return - current_readings.total_return) / interval * 3600)
+                                        dbg_print(1, "No previous readings found, cannot post production/ consumption message")
+                                client.disconnect()
+                                client.connected_flag = False
+                                client.loop_stop()
+                                dbg_print(1,"connection closed")
+                                break
+                        else:
+                                time.sleep(1)
+                                dbg_print(1,"waiting for connection")
 
-			domoticz_url = format("http://%s/json.htm?type=command&param=udevice&idx=%s&nvalue=0&svalue=%s;%s;%s;%s;%s;%s"
-				%(
-				domoticzserver, 
-				device_index, 
-				current_readings.usage1, 
-				current_readings.usage2, 
-				current_readings.return1, 
-				current_readings.return2, 
-				consumption, 
-				production	
-				))	
-			dbg_print(0, "URL = "  + domoticz_url)
-			try:
-				resp = requests.get(domoticz_url, auth=HTTPBasicAuth(domoticzusername, domoticzpassword))
-			except requests.HTTPError as e:
-				print("Domoticz HTTP error", e.reason)
-			except requests.ConnectionError:
-				print("Domoticz Request failed!")
-			else:
-				if resp.status_code == 200:
-					print("Domoticz update successfull!")
-				else:
-					print("domoticz update failed:", resp.status_code)
-			
-		else:
-			dbg_print(1, "No previous readings found, cannot update domoticz")
-		if dump_previous_readings(current_readings):
-			dbg_print(1, "dumped readings to state file")
+                        if a > 5:
+                                dbg_print(1,"connection timed out")
+                                client.loop_stop()
+                                break
+                if dump_previous_readings(current_readings):
+                        dbg_print(1, "dumped readings to state file")
 
 def main():
-	while 1:
-		start_time = time.time()	
-		do_work()
-		time_left = start_time + update_interval - time.time()
-		if time_left > 0:
-			dbg_print(1, "sleeping for %d seconds" % time_left)
-			time.sleep(time_left)
-		else:
-			dbg_print(1, "Interval already expired, start next reading")
+        while 1:
+                start_time = time.time()
+                do_work()
+                time_left = start_time + update_interval - time.time()
+                if time_left > 0:
+                        dbg_print(1, "sleeping for %d seconds" % time_left)
+                        time.sleep(time_left)
+                else:
+                        dbg_print(1, "Interval already expired, start next reading")
 
 if __name__ == '__main__':
-	main()
+        main()
 
 
+        # Wait for data
+
+        ir_buffer = ''
+        ir_lines_index = 0
+        ir_lines = []
+
+        ETX = False
