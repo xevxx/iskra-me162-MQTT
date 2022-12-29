@@ -2,9 +2,11 @@
 # iskra-me162 Read digital (not smart) meter
 # Release 0.1.0
 # Author l. Lagendijk
+# Edit xevxx
 # based on work by J. Jeurissen and J. van der Linde
 # Copyright (c) 2012/2013 J. Jeurissen & J. van der Linde
 # modifications (c) 2016 L. Lagendijk
+# modifications (c) 2022 xevxx
 # Phyton 3
 from __future__ import print_function
 import sys
@@ -35,6 +37,9 @@ config_file = "/etc/default/iskra-me162.config"
 # domoticzusername = ""
 # domoticzpassword = ""
 # print_debug = False
+msg_prefix = "meter/me162/"
+broker_address="192.168.10.169"
+client_name = "p1"
 
 
 #########################################
@@ -54,10 +59,8 @@ def on_connect(client, userdata, flags, rc):
                 client.bad_connection_flag=True
                 client.connected_flag=False
 
-msg_prefix = "meter/me162/"
-broker_address="192.168.10.169"
-client = mqtt.Client("P1")
-#client.connect(broker_address)
+
+client = mqtt.Client(client_name)
 client.on_message=on_message
 client.on_connect=on_connect
 client.connected_flag=False
@@ -271,6 +274,7 @@ def do_work():
                         a += 1
                         if client.connected_flag == True:
                                 dbg_print(2,"connection successful")
+                                json_resp = {}
                                 if previous_readings is not None:
 
                                         # We need the previous reading to calulate actual consumption and production
@@ -281,24 +285,42 @@ def do_work():
                                         interval = current_readings.time - previous_readings.time
                                         consumption = int((current_readings.total_usage - previous_readings.total_usage) / interval * 3600)
                                         production = int((current_readings.total_return - current_readings.total_return) / interval * 3600)
-
-                                        #client.publish(msg_prefix + "usage1",current_readings.usage1)
-                                        #client.publish(msg_prefix + "usage2",current_readings.usage2)
-                                        #client.publish(msg_prefix + "return1",current_readings.return1)
-                                        #client.publish(msg_prefix + "return2",current_readings.return2)
-                                        client.publish(msg_prefix + "total_usage",current_readings.total_usage/1000)
-                                        client.publish(msg_prefix + "total_return",current_readings.total_return/1000)
-                                        client.publish(msg_prefix + "consumption",consumption/1000)
-                                        client.publish(msg_prefix + "production",production/1000)
+                                        
+                                        json_resp["usage1"] = current_readings.usage1/1000
+                                        json_resp["usage2"] = current_readings.usage2/1000
+                                        json_resp["return1"] = current_readings.return1/1000
+                                        json_resp["return2"] = current_readings.return2/1000
+                                        json_resp["total_usage"] = current_readings.total_usage/1000
+                                        json_resp["total_return"] = current_readings.total_return/1000
+                                        json_resp["consumption"] = consumption/1000
+                                        json_resp["production"] = production/1000
+                                        #client.publish(msg_prefix + "usage1",current_readings.usage1/1000)
+                                        #client.publish(msg_prefix + "usage2",current_readings.usage2/1000)
+                                        #client.publish(msg_prefix + "return1",current_readings.return1/1000)
+                                        #client.publish(msg_prefix + "return2",current_readings.return2/1000)
+                                        #client.publish(msg_prefix + "total_usage",current_readings.total_usage/1000)
+                                        #client.publish(msg_prefix + "total_return",current_readings.total_return/1000)
+                                        #client.publish(msg_prefix + "consumption",consumption/1000)
+                                        #client.publish(msg_prefix + "production",production/1000)
                                 else:
-                                        client.publish(msg_prefix + "total_usage",current_readings.total_usage/1000)
-                                        client.publish(msg_prefix + "total_return",current_readings.total_return/1000)
-                                        #client.publish(msg_prefix + "usage1",current_readings.usage1)
-                                        #client.publish(msg_prefix + "usage2",current_readings.usage2)
-                                        #client.publish(msg_prefix + "return1",current_readings.return1)
-                                        #client.publish(msg_prefix + "return2",current_readings.return2)
+                                        json_resp["usage1"] = current_readings.usage1/1000
+                                        json_resp["usage2"] = current_readings.usage2/1000
+                                        json_resp["return1"] = current_readings.return1/1000
+                                        json_resp["return2"] = current_readings.return2/1000
+                                        json_resp["total_usage"] = current_readings.total_usage/1000
+                                        json_resp["total_return"] = current_readings.total_return/1000
+                                        json_resp["consumption"] = 0
+                                        json_resp["production"] = 0
+                                        #client.publish(msg_prefix + "total_usage",current_readings.total_usage/1000)
+                                        #client.publish(msg_prefix + "total_return",current_readings.total_return/1000)
+                                        #client.publish(msg_prefix + "usage1",current_readings.usage1/1000)
+                                        #client.publish(msg_prefix + "usage2",current_readings.usage2/1000)
+                                        #client.publish(msg_prefix + "return1",current_readings.return1/1000)
+                                        #client.publish(msg_prefix + "return2",current_readings.return2/1000)
 
                                         dbg_print(1, "No previous readings found, cannot post production/ consumption message")
+                                json_string = json.dumps(json_resp)
+                                client.publish(msg_prefix + "readings",json_string)
                                 client.disconnect()
                                 client.connected_flag = False
                                 client.loop_stop()
