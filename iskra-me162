@@ -358,12 +358,3 @@ def main():
 
 if __name__ == '__main__':
         main()
-
-
-        # Wait for data
-
-        ir_buffer = ''
-        ir_lines_index = 0
-        ir_lines = []
-
-        ETX = False
