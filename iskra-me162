@@ -195,7 +195,15 @@ def do_read_meter():
         ser.flush()
         dbg_print(1, "Sent: <ACK>" + '0' + ir_speed + "0")
 
-        ser.baudrate = ir_baud        
+        ser.baudrate = ir_baud    
+         # Wait for data
+
+        ir_buffer = ''
+        ir_lines_index = 0
+        ir_lines = []
+
+        ETX = False
+
         while not ETX:
                 ir_buffer = str(ser.readline(), "utf-8")
                 if '\x060' in ir_buffer:
