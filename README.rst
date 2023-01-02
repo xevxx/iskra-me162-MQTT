@@ -1,4 +1,4 @@
-**Daemon script to feed ISKRA ME162 data to Domoticz**
+**Daemon script to feed ISKRA ME162 data to MQTT**
 ===================================================
 
 This python script can run as a daemon and reads the usage data from an
@@ -7,6 +7,7 @@ an iec62056-21 interface.
 The script was developed using a IR-head from 
 http://wiki.volkszaehler.org/hardware/controllers/ir-schreib-lesekopf-usb-ausgang
 Other IR-heads should work too, but have not yet been tested.
+-Tested working with generic head reader from aliexpress
 
 **Requirements**
 ------------
@@ -23,11 +24,6 @@ This file looks like:
 
 ::
 
-	# Settings for the domoticz server
-
-	domoticzserver="domoticz.home.fazant.net:8080"
-	domoticzusername = "XXXXX"
-	domoticzpassword = "XXXXXXXX"
 	device_index = 54
 
 	# port for ir-head
@@ -54,16 +50,6 @@ This file looks like:
 **Description of the options in the configuration file**
 -----------------------------------------------------
 
-The settings for the domoticz server are pretty simple.
-The script expects a dummy device of type "Dummy". Click then the
-"create virtual sensors" button and select the "P1 smart meter (electric)" 
-type for the virtual sensor.
-In the Setup->Devices tab look for the new device and note the Idx value
-allocated to the sensor. Edit the configuration file device_index to match 
-the new device index. 
-
-If your IR-head is connected to a different serial port, edit the port value.
-
 Print_debug will enable debug printouts from the script so you can see what
 happens.See the configuration file for a description of the possible values.
 
@@ -73,7 +59,7 @@ a tmpfs filesystem. If the statefile is not found (e.g. after a reboot) it will
 be re-created.
 
 The script is meant to be run  as a daemon. The update-interval determines
-the frequency of updating Domoticz. A value of at least 60 seconds shall be
+the frequency of the mqtt updates. A value of at least 60 seconds shall be
 chosen. Recommended value: 120 (seconds)
 
 **Systemd integration**
@@ -113,7 +99,7 @@ You can get a local copy of the development repository with::
 
 Copyright (C) 2016 Louis Lagendijk <louis.lagendijk@gmail.com>
 Based on previous work by J. Jeurissen and J. van der Linde ((c) 2012/2013)
-
+updates for MQTT by xevxx 2023
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
