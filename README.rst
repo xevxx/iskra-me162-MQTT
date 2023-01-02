@@ -1,7 +1,7 @@
 **Daemon script to feed ISKRA ME162 data to MQTT**
 ===================================================
 
-Forked and modifed from
+Forked and modifed from llagendijk/iskra-me162. 
 This python script can run as a daemon and reads the usage data from an
 ISKRA ME162 (will most likely work for other digital meters that have
 an iec62056-21 interface.
