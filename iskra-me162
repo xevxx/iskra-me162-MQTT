@@ -33,9 +33,6 @@ version = "v5.1 Iskra ME 162 configurable"
 # Settings for the domoticz server read from the configuration file
 config_file = "/etc/default/iskra-me162.config"
 # port = "/dev/ttyUSB0
-# domoticzserver="127.0.0.1:8080"
-# domoticzusername = ""
-# domoticzpassword = ""
 # print_debug = False
 msg_prefix = "meter/me162/"
 broker_address="192.168.10.169"
@@ -286,7 +283,7 @@ def do_work():
                                 if previous_readings is not None:
 
                                         # We need the previous reading to calulate actual consumption and production
-                                        # so if we do not yet have previous readings we skip the domoticz update
+                                        # so if we do not yet have previous readings we skip the mqtt update for consumtion/ production
 
                                         dbg_print(1, "Previous readings found,  update mqtt")
 
@@ -302,14 +299,6 @@ def do_work():
                                         json_resp["total_return"] = current_readings.total_return/1000
                                         json_resp["consumption"] = consumption/1000
                                         json_resp["production"] = production/1000
-                                        #client.publish(msg_prefix + "usage1",current_readings.usage1/1000)
-                                        #client.publish(msg_prefix + "usage2",current_readings.usage2/1000)
-                                        #client.publish(msg_prefix + "return1",current_readings.return1/1000)
-                                        #client.publish(msg_prefix + "return2",current_readings.return2/1000)
-                                        #client.publish(msg_prefix + "total_usage",current_readings.total_usage/1000)
-                                        #client.publish(msg_prefix + "total_return",current_readings.total_return/1000)
-                                        #client.publish(msg_prefix + "consumption",consumption/1000)
-                                        #client.publish(msg_prefix + "production",production/1000)
                                 else:
                                         json_resp["usage1"] = current_readings.usage1/1000
                                         json_resp["usage2"] = current_readings.usage2/1000
@@ -319,12 +308,6 @@ def do_work():
                                         json_resp["total_return"] = current_readings.total_return/1000
                                         json_resp["consumption"] = 0
                                         json_resp["production"] = 0
-                                        #client.publish(msg_prefix + "total_usage",current_readings.total_usage/1000)
-                                        #client.publish(msg_prefix + "total_return",current_readings.total_return/1000)
-                                        #client.publish(msg_prefix + "usage1",current_readings.usage1/1000)
-                                        #client.publish(msg_prefix + "usage2",current_readings.usage2/1000)
-                                        #client.publish(msg_prefix + "return1",current_readings.return1/1000)
-                                        #client.publish(msg_prefix + "return2",current_readings.return2/1000)
 
                                         dbg_print(1, "No previous readings found, cannot post production/ consumption message")
                                 json_string = json.dumps(json_resp)
