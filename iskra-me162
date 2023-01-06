@@ -334,7 +334,7 @@ def do_work():
                                         break
                         if dump_previous_readings(current_readings):
                                 dbg_print(1, "dumped readings to state file")
-                Except:
+                except:
                       dbg_print(1,"connection timed out")  
 
 def main():
