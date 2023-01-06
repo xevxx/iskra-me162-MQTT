@@ -53,8 +53,7 @@ def on_message(client, userdata, message):
         messages.append([topic,msg])
 def on_connect(client, userdata, flags, rc):
         if rc==0:
-                
-                ed_flag=True
+                client.connected_flag=True
                 #client.subscribe(sub_topic)
         else:
                 client.bad_connection_flag=True
@@ -278,64 +277,67 @@ def do_work():
                 if broker_use_userpass == True:
                         client.username_pw_set(broker_u, broker_p)
                 try:
-                        client.connect(broker_address)
                         client.loop_start()
-                        dbg_print(2,"mqtt connection started")
-                        a= 0
-                        while 1:
-                                a += 1
-                                if client.connected_flag == True:
-                                        dbg_print(2,"connection successful")
-                                        json_resp = {}
-                                        if previous_readings is not None:
-
-                                                # We need the previous reading to calulate actual consumption and production
-                                                # so if we do not yet have previous readings we skip the mqtt update for consumtion/ production
-
-                                                dbg_print(1, "Previous readings found,  update mqtt")
-
-                                                interval = current_readings.time - previous_readings.time
-                                                consumption = int((current_readings.total_usage - previous_readings.total_usage) / interval * 3600)
-                                                production = int((current_readings.total_return - current_readings.total_return) / interval * 3600)
-
-                                                json_resp["usage1"] = current_readings.usage1/1000
-                                                json_resp["usage2"] = current_readings.usage2/1000
-                                                json_resp["return1"] = current_readings.return1/1000
-                                                json_resp["return2"] = current_readings.return2/1000
-                                                json_resp["total_usage"] = current_readings.total_usage/1000
-                                                json_resp["total_return"] = current_readings.total_return/1000
-                                                json_resp["consumption"] = consumption/1000
-                                                json_resp["production"] = production/1000
-                                        else:
-                                                json_resp["usage1"] = current_readings.usage1/1000
-                                                json_resp["usage2"] = current_readings.usage2/1000
-                                                json_resp["return1"] = current_readings.return1/1000
-                                                json_resp["return2"] = current_readings.return2/1000
-                                                json_resp["total_usage"] = current_readings.total_usage/1000
-                                                json_resp["total_return"] = current_readings.total_return/1000
-                                                json_resp["consumption"] = 0
-                                                json_resp["production"] = 0
-
-                                                dbg_print(1, "No previous readings found, cannot post production/ consumption message")
-                                        json_string = json.dumps(json_resp)
-                                        client.publish(msg_prefix + "readings",json_string)
-                                        client.disconnect()
-                                        client.connected_flag = False
-                                        client.loop_stop()
-                                        dbg_print(1,"connection closed")
-                                        break
-                                else:
-                                        time.sleep(1)
-                                        dbg_print(1,"waiting for connection")
-
-                                if a > 5:
-                                        dbg_print(1,"connection timed out")
-                                        client.loop_stop()
-                                        break
-                        if dump_previous_readings(current_readings):
-                                dbg_print(1, "dumped readings to state file")
+                        client.connect(broker_address)
                 except:
-                      dbg_print(1,"connection timed out")  
+                        dbg_print(1,"connection failed - timeout")  
+                        return                      
+                
+                dbg_print(2,"mqtt connection started")
+                a= 0
+                while 1:
+                        a += 1
+                        if client.connected_flag == True:
+                                dbg_print(2,"connection successful")
+                                json_resp = {}
+                                if previous_readings is not None:
+
+                                        # We need the previous reading to calulate actual consumption and production
+                                        # so if we do not yet have previous readings we skip the mqtt update for consumtion/ production
+
+                                        dbg_print(1, "Previous readings found,  update mqtt")
+
+                                        interval = current_readings.time - previous_readings.time
+                                        consumption = int((current_readings.total_usage - previous_readings.total_usage) / interval * 3600)
+                                        production = int((current_readings.total_return - current_readings.total_return) / interval * 3600)
+
+                                        json_resp["usage1"] = current_readings.usage1/1000
+                                        json_resp["usage2"] = current_readings.usage2/1000
+                                        json_resp["return1"] = current_readings.return1/1000
+                                        json_resp["return2"] = current_readings.return2/1000
+                                        json_resp["total_usage"] = current_readings.total_usage/1000
+                                        json_resp["total_return"] = current_readings.total_return/1000
+                                        json_resp["consumption"] = consumption/1000
+                                        json_resp["production"] = production/1000
+                                else:
+                                        json_resp["usage1"] = current_readings.usage1/1000
+                                        json_resp["usage2"] = current_readings.usage2/1000
+                                        json_resp["return1"] = current_readings.return1/1000
+                                        json_resp["return2"] = current_readings.return2/1000
+                                        json_resp["total_usage"] = current_readings.total_usage/1000
+                                        json_resp["total_return"] = current_readings.total_return/1000
+                                        json_resp["consumption"] = 0
+                                        json_resp["production"] = 0
+
+                                        dbg_print(1, "No previous readings found, cannot post production/ consumption message")
+                                json_string = json.dumps(json_resp)
+                                client.publish(msg_prefix + "readings",json_string)
+                                client.disconnect()
+                                client.connected_flag = False
+                                client.loop_stop()
+                                dbg_print(1,"connection closed")
+                                break
+                        else:
+                                time.sleep(1.5)
+                                dbg_print(1,"waiting for connection")
+
+                        if a > 5:
+                                dbg_print(1,"connection timed out")
+                                client.loop_stop()
+                                break
+                if dump_previous_readings(current_readings):
+                        dbg_print(1, "dumped readings to state file")
+                
 
 def main():
         while 1:
