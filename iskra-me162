@@ -37,7 +37,7 @@ config_file = "/etc/default/iskra-me162.config"
 msg_prefix = "meter/me162/"
 broker_address="IPADDRESS"
 client_name = "CHOICEOFNAME"
-broker_u - "MQTT USER IF REQUIRED"
+broker_u = "MQTT USER IF REQUIRED"
 broker_p = "MQTT PASS IF REQUIRED"
 broker_use_userpass = False
 
