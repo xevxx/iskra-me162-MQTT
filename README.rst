@@ -1,101 +1,79 @@
-**Daemon script to feed ISKRA ME162 data to MQTT**
-===================================================
+ISKRA ME162 MQTT reader
+======================
 
-Forked and modifed from llagendijk/iskra-me162. 
-This python script can run as a daemon and reads the usage data from an
-ISKRA ME162 (will most likely work for other digital meters that have
-an iec62056-21 interface.
-The script was developed using a IR-head from 
-http://wiki.volkszaehler.org/hardware/controllers/ir-schreib-lesekopf-usb-ausgang
-Other IR-heads should work too, but have not yet been tested.
--Tested working with generic head reader from aliexpress
+This daemon reads the ISKRA ME162 electricity meter through a USB optical
+head and publishes its energy readings to MQTT.
 
-**Requirements**
+Installation
 ------------
-Python3 
 
-**Usage:**
-------
-*iskra-me162*
+Use Python 3.8 or newer. On Raspberry Pi OS or another systemd distribution,
+install the reader in a virtual environment. The package installs pySerial
+and supports Paho MQTT 1.6 and 2.x. From the checkout, run::
 
-**Configuration**
+    sudo python3 -m venv /opt/iskra-me162
+    sudo /opt/iskra-me162/bin/python -m pip install .
+    sudo ln -s /opt/iskra-me162/bin/iskra-me162 /usr/local/bin/iskra-me162
+
+For a new installation, copy the sample configuration::
+
+    sudo install -m 0600 iskra-me162.config /etc/default/iskra-me162.config
+
+Set ``broker_address`` to your MQTT broker's hostname or IP address, and set
+``port`` to your optical head's device path. The MQTT port defaults to 1883.
+If the broker requires credentials, set ``broker_use_userpass = True`` and
+fill in ``broker_u`` and ``broker_p``. Use a distinct ``client_name`` for each reader
+connected to the same broker.
+
+The configuration file uses Python syntax and runs at startup. Keep it
+writable only by the administrator. Leave ``use_highspeed = False`` for 300 baud
+unless your optical head works reliably at the speed advertised by the meter.
+The default polling interval is 120 seconds. Set ``print_debug = 2`` for more
+detail in the journal.
+
+To install and start the service::
+
+    sudo install -m 0644 iskra-me162.service /etc/systemd/system/
+    sudo systemctl daemon-reload
+    sudo systemctl enable --now iskra-me162.service
+    sudo journalctl -u iskra-me162.service -f
+
+Upgrading
+---------
+
+Keep your existing ``/etc/default/iskra-me162.config`` and state file. Before
+replacing the script, move any broker settings or topic prefix you edited in
+it into the configuration file. If an older installation put the executable
+directly at ``/usr/local/bin/iskra-me162``, replace it with the virtual
+environment symlink after backing up the old script.
+Install the updated unit and restart the service::
+
+    sudo install -m 0644 iskra-me162.service /etc/systemd/system/
+    sudo systemctl daemon-reload
+    sudo systemctl restart iskra-me162.service
+
+MQTT readings
 -------------
-The package installs a configuration file in /etc/default/iskra-me162.
-This file looks like:
 
-::
+The reader publishes JSON on ``meter/me162/readings`` by default. The
+``msg_prefix`` setting controls the part of the topic before ``readings``.
 
-	device_index = 54
+- ``usage1``, ``usage2``, ``return1``, ``return2``, ``total_usage``, and ``total_return``
+  are cumulative energy counters in kWh.
+- ``consumption`` and ``production`` are average import and export power in kW
+  since the last acknowledged reading. Both are zero when there is no usable
+  baseline, such as on first run or after a counter reset.
 
-	# port for ir-head
+The reader requests a broker acknowledgement using MQTT QoS 1. During an
+outage it keeps the last acknowledged baseline. The first successful message
+after recovery carries the latest totals and rates averaged over the elapsed
+interval. QoS 1 can produce duplicates when an acknowledgement goes missing.
 
-	port = "/dev/ttyUSB0"
+The default state file is ``/var/run/me162-state``. A reboot may clear it when
+``/var/run`` is on tmpfs. The reader can load state from the old script and
+writes the next acknowledged baseline in JSON.
 
-	# use high speed: switch to high speed reading, may not work
-	# Set True or False
-	use_highspeed = False
-
-	# print debug information?
-	# 0 = no debug information printed
-	# 1 = normal debug information printed
-	# 2 = detailed information printed
-	print_debug = 0
-
-	# state file is often written, so on a raspberry pi make sure it
-	# is on a memory back file system (tmpfs)
-	state_file = "/var/run/me162-state"
-
-	# interval for updating domoticz, recommend at least 60 seconds
-	update_interval = 120
-
-**Description of the options in the configuration file**
------------------------------------------------------
-
-Print_debug will enable debug printouts from the script so you can see what
-happens.See the configuration file for a description of the possible values.
-
-The script needs to maintain some state of the latest values sent to domoticz.
-In order not to wear out the sd-card it is recommended to store the file on 
-a tmpfs filesystem. If the statefile is not found (e.g. after a reboot) it will
-be re-created.
-
-The script is meant to be run  as a daemon. The update-interval determines
-the frequency of the mqtt updates. A value of at least 60 seconds shall be
-chosen. Recommended value: 120 (seconds)
-
-**Systemd integration**
-A systemd service file is included in the package. Execute the following to enable
-the service:
-
-::
-	systemctl daemon-reload
-	systemctl enable iskra-me162.service
-	systemctl start iskra-me162.service
-
-**Known problems**
---------------
-The use_highspeed option, used to control the speed of the serial connection
-does not always work. As the amount of data to be transferred is fairly small
-I recommend leaving the serial speed at 300 baud (use_highspeed = False) so it always
-works!
-
-The values for current consumption and energy delivered are caculated from the
-total consumption/delivered counters. They result is not very accurate.
-
-**Feedback**
---------
-
-Please send patches or bug reports to <louis.lagendijk@gmail.com>
-
-**Source**
-------
-
-You can get a local copy of the development repository with::
-
-    git clone git://github.com/xevxx/iskra-me162-MQTT
-
-
-**License**
+License
 -------
 
 Copyright (C) 2016 Louis Lagendijk <louis.lagendijk@gmail.com>

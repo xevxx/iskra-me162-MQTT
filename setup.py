@@ -1,29 +1,14 @@
-#!/usr/bin/python3
-import os
-from distutils.core import setup
+#!/usr/bin/env python3
+from setuptools import setup
 
-def read(fname):
-        return open(os.path.join(os.path.dirname(__file__), fname)).read
-
-setup(  name='iskra-me162',
-        version='0.1.0',
-        description="Script that feeds ME162 readings as a P1 meter to Domoticz",
-        license="GPLv3",
-        # long_description=read("README.rst"),
-        author='Louis Lagendijk',
-        author_email='louis.lagendijk@gmail.com',
-		url = "https://github.com/llagendijk/iskra-me162.git",
-        classifiers = [
-		"Programming Language :: Python",
-		"Programming Language :: Python :: 3",
-		"License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
-                "Environment :: No Input/Output (Daemon)",
-                "Development Status :: 4 - Beta", 
-		],
-        scripts = ["iskra-me162"],
-		data_files = [
-				("/etc/default", ["iskra-me162.config"]),
-		      		("/etc/systemd/system", ["iskra-me162.service"]),
-		     ],
+setup(
+    name="iskra-me162",
+    version="0.2.0",
+    description="Publish Iskra ME162 meter readings to MQTT",
+    license="GPLv3",
+    author="Louis Lagendijk",
+    url="https://github.com/xevxx/iskra-me162-MQTT",
+    python_requires=">=3.8",
+    install_requires=["pyserial>=3.4,<4", "paho-mqtt>=1.6,<3"],
+    scripts=["iskra-me162"],
 )
-

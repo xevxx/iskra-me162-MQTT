@@ -1,354 +1,346 @@
-#!/usr/bin/python
+#!/usr/bin/env python3
 # iskra-me162 Read digital (not smart) meter
-# Release 0.1.0
 # Author l. Lagendijk
 # Edit xevxx
 # based on work by J. Jeurissen and J. van der Linde
 # Copyright (c) 2012/2013 J. Jeurissen & J. van der Linde
 # modifications (c) 2016 L. Lagendijk
 # modifications (c) 2022 xevxx
-# Phyton 3
-from __future__ import print_function
-import sys
-import serial
-import datetime
-import time
-import csv
-import locale
-import os
-import requests
-from requests.auth import HTTPBasicAuth
+import io
 import json
-import base64
+import logging
+import math
+import os
 import pickle
-from pprint import pprint
-from parse import *
-from parse import compile
-import _thread
-from threading import Timer
-import paho.mqtt.client as mqtt 
+import re
+import tempfile
+import termios
+import time
+from decimal import Decimal
+from pathlib import Path
+from types import SimpleNamespace
 
-version = "v5.1 Iskra ME 162 configurable"
-
-# Settings for the domoticz server read from the configuration file
-config_file = "/etc/default/iskra-me162.config"
-# port = "/dev/ttyUSB0
-# print_debug = False
-msg_prefix = "meter/me162/"
-broker_address="IPADDRESS"
-client_name = "CHOICEOFNAME"
-broker_u = "MQTT USER IF REQUIRED"
-broker_p = "MQTT PASS IF REQUIRED"
-broker_use_userpass = False
+import paho.mqtt.client as mqtt
+import serial
 
 
-#########################################
-# MQTT #
-#########################################
+CONFIG_FILE = Path("/etc/default/iskra-me162.config")
+SERIAL_TIMEOUT = 30
+MQTT_TIMEOUT = 10
+LOG = logging.getLogger("iskra-me162")
 
-def on_message(client, userdata, message):
-        msg=str(message.payload.decode("utf-8"))
-        #print("message =",msg)
-        topic=message.topic
-        messages.append([topic,msg])
-def on_connect(client, userdata, flags, rc):
-        if rc==0:
-                client.connected_flag=True
-                #client.subscribe(sub_topic)
+DEFAULTS = {
+    "port": "/dev/ttyUSB0",
+    "use_highspeed": False,
+    "print_debug": 1,
+    "state_file": "/var/run/me162-state",
+    "update_interval": 120,
+    "msg_prefix": "meter/me162/",
+    "broker_address": "",
+    "broker_port": 1883,
+    "client_name": "CHOICEOFNAME",
+    "broker_u": "",
+    "broker_p": "",
+    "broker_use_userpass": False,
+}
+
+ENERGY_FIELDS = {
+    "1.8.1": "usage1",
+    "1.8.2": "usage2",
+    "2.8.1": "return1",
+    "2.8.2": "return2",
+    "1.8.0": "total_usage",
+    "2.8.0": "total_return",
+}
+ENERGY_VALUE = re.compile(r"([+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+))(?:\*kWh)?")
+IDENTIFICATION = re.compile(rb"/[A-Z]{3}[0-9][ -~]*")
+BAUD_RATES = {"0": 300, "1": 600, "2": 1200, "3": 2400, "4": 4800, "5": 9600, "6": 19200}
+
+
+class MeterError(Exception):
+    pass
+
+
+class MQTTError(Exception):
+    pass
+
+
+def load_config(path=CONFIG_FILE):
+    settings = DEFAULTS.copy()
+    exec(compile(path.read_bytes(), str(path), "exec"), settings)
+    config = SimpleNamespace(**{key: settings[key] for key in DEFAULTS})
+    if not isinstance(config.broker_address, str) or not config.broker_address.strip():
+        raise ValueError("Set broker_address to the MQTT broker hostname or IP address")
+    if type(config.broker_port) is not int or not 1 <= config.broker_port <= 65535:
+        raise ValueError("broker_port must be an integer from 1 through 65535")
+    if (type(config.update_interval) not in (int, float)
+            or not math.isfinite(config.update_interval) or config.update_interval <= 0):
+        raise ValueError("update_interval must be a positive number of seconds")
+    return config
+
+
+def time_remaining(deadline):
+    return max(0, deadline - time.monotonic())
+
+
+def serial_remaining(deadline, phase):
+    remaining = time_remaining(deadline)
+    if not remaining:
+        raise MeterError(f"Timed out during {phase}")
+    return remaining
+
+
+def serial_lines(port, deadline, phase):
+    line = bytearray()
+    while True:
+        remaining = serial_remaining(deadline, phase)
+        if port.timeout > remaining:
+            port.timeout = remaining
+        byte = port.read(1)
+        serial_remaining(deadline, phase)
+        if byte == b"\n":
+            yield bytes(line).rstrip(b"\r")
+            line.clear()
+        elif byte:
+            line.extend(byte)
+            if len(line) > 1024:
+                raise MeterError(f"Overlong line during {phase}")
+
+
+def serial_write(port, command, deadline):
+    port.write_timeout = serial_remaining(deadline, "serial write")
+    if port.write(command) != len(command):
+        raise MeterError("Incomplete serial write")
+
+
+def parse_readings(lines):
+    readings = {"time": time.time(), "serial": None}
+    for line in lines:
+        register, opening, value = line.strip().partition("(")
+        if register == "C.1.0" and opening and value.endswith(")"):
+            readings["serial"] = value[:-1].strip() or None
+        if register not in ENERGY_FIELDS:
+            continue
+        match = ENERGY_VALUE.fullmatch(value[:-1]) if opening and value.endswith(")") else None
+        if match is None or len(match[1]) > 32:
+            raise MeterError(f"Invalid value for register {register}")
+        energy = Decimal(match[1])
+        if energy < 0:
+            raise MeterError(f"Negative value for register {register}")
+        numerator, denominator = energy.as_integer_ratio()
+        field = ENERGY_FIELDS[register]
+        if field in readings:
+            raise MeterError(f"Duplicate register {register}")
+        readings[field] = numerator * 1000 // denominator
+
+    missing = [register for register, field in ENERGY_FIELDS.items() if field not in readings]
+    if missing:
+        raise MeterError("Missing energy registers " + ", ".join(missing))
+    return readings
+
+
+def read_meter(config):
+    deadline = time.monotonic() + SERIAL_TIMEOUT
+    with serial.Serial(config.port, baudrate=300, bytesize=serial.SEVENBITS,
+                       parity=serial.PARITY_EVEN, stopbits=serial.STOPBITS_ONE,
+                       timeout=0.1, write_timeout=SERIAL_TIMEOUT) as port:
+        serial_write(port, b"/?!\r\n", deadline)
+        for line in serial_lines(port, deadline, "meter identification"):
+            if IDENTIFICATION.fullmatch(line):
+                break
+
+        speed = chr(line[4]) if config.use_highspeed else "0"
+        if speed not in BAUD_RATES:
+            speed = "0"
+        ack = b"\x060" + speed.encode("ascii") + b"0\r\n"
+        sent_at = time.monotonic()
+        serial_write(port, ack, deadline)
+        if speed != "0":
+            # Allow the ACK to leave the transmit queue at the original speed.
+            earliest_switch = sent_at + len(ack) * 10 / 300
+            while port.out_waiting or time.monotonic() < earliest_switch:
+                time.sleep(min(0.01, serial_remaining(deadline, "baud rate change")))
+            serial_remaining(deadline, "baud rate change")
+            port.baudrate = BAUD_RATES[speed]
+        LOG.debug("Reading telegram at %d baud", BAUD_RATES[speed])
+
+        lines = []
+        for line in serial_lines(port, deadline, "meter data"):
+            if not line or line == ack.rstrip(b"\r\n"):
+                continue
+            if not lines and line.startswith(b"\x02"):
+                line = line[1:]
+            if line.strip() == b"!":
+                break
+            try:
+                lines.append(line.decode("ascii"))
+            except UnicodeDecodeError as exc:
+                raise MeterError("Non-ASCII data in meter telegram") from exc
+    return parse_readings(lines)
+
+
+class LegacyMeterReadings:
+    """Container for state written by the original script."""
+
+
+class LegacyStateUnpickler(pickle.Unpickler):
+    def find_class(self, module, name):
+        if (module, name) == ("__main__", "MeterReadings"):
+            return LegacyMeterReadings
+        raise pickle.UnpicklingError("Unexpected class in state file")
+
+
+def load_baseline(path):
+    try:
+        with open(path, "rb") as state:
+            data = state.read(4097)
+        if len(data) > 4096:
+            raise ValueError("State file is too large")
+        if data.lstrip().startswith(b"{"):
+            readings = json.loads(data)
         else:
-                client.bad_connection_flag=True
-                client.connected_flag=False
-
-
-client = mqtt.Client(client_name)
-client.on_message=on_message
-client.on_connect=on_connect
-client.connected_flag=False
-
-
-with open(config_file) as config:
-        exec(config.read())
-
-class MeterReadings:
-
-        def __init__(self, ir_lines):
-                self.time = time.time()
-                self.serial = self.get_value("C.1.0", ir_lines)
-                self.total_usage = self.get_wh( "1.8.0", ir_lines)
-                self.usage1 = self.get_wh( "1.8.1", ir_lines)
-                self.usage2 = self.get_wh( "1.8.2", ir_lines)
-                self.total_return = self.get_wh( "2.8.0", ir_lines)
-                self.return1 = self.get_wh( "2.8.1", ir_lines)
-                self.return2 = self.get_wh( "2.8.2", ir_lines)
-                self.error = self.get_value( "F.F", ir_lines)
-
-        def get_value(self, id, line_array):
-                # for i in range(len(line_array)):
-
-                parser = compile("{}({})")
-                for line in line_array:
-                        if line != "!":
-                                result = parser.parse(line)
-
-                                dbg_print(2, "checking %s for %s" %(line, id))
-
-                                if result[0] == id:
-                                        value_str = result[1]
-                                        dbg_print (2, "%s = %s kwh" %(id, value_str))
-                                        return  value_str
-
-        def get_wh(self, id, line_array):
-                value = self.get_value(id, line_array)
-                if value is None:
-                        return None
-                kwh = value.replace('*kWh', '')
-                dbg_print (2, "%s = %s kwh" %(id, kwh))
-                wh = float(kwh) * 1000
-                return int(wh)
-
-def dbg_print(level, *args):
-        if(print_debug >= int(level)):
-                my_args = ' '.join(map(str, args))
-                print(my_args)
-
-
-
-#########################################
-# Meter reading routine
-#########################################
-
-def do_read_meter():
-
-        #Set initial COM port config
-        ser = serial.Serial()
-        ser.baudrate = 300
-        ser.bytesize = serial.SEVENBITS
-        ser.parity = serial.PARITY_EVEN
-        ser.stopbits = serial.STOPBITS_ONE
-        ser.xonxoff = 0
-        ser.rtscts = 0
-        ser.timeout = 20
-
-        ser.port = port
-
-        dbg_print (1, "Open COM port %s at %s baud" % (port, ser.baudrate))
-
-        ser.open()
-
-        #Initialize connection
-
-        dbg_print (1, "Send initialization: /?<CR><LF>")
-        ir_command = '/?!\x0D\x0A'
-        ser.write(ir_command.encode('utf-8'))
-        ser.flush()
-
-        #Wait for initialization confirmation
-        # /[XXX] [Z] MCC [CR] [LF]   /KAM0MCC[CR][LF]
-        #       XXX is manufacturer string
-        #       Z is the high baudrate supported
-        #       MCC is the meter model + software version
-
-        ir_buffer = ''
-        while '/' not in ir_buffer:
-                ir_buffer = str(ser.readline(), "utf-8")
-                if '/?!\x0D\x0A' in ir_buffer:
-                        ir_buffer = str(ser.readline(), "utf-8")
-
-        dbg_print (1, "Initialization done.")
-        if use_highspeed:
-                ir_speed = ir_buffer[4:5]
-        else:
-                ir_speed = 0
-
-
-        if   ir_speed == '0':
-                ir_baud = "300"
-        elif ir_speed == '1':
-                ir_baud = "600"
-        elif ir_speed == '2':
-                ir_baud = "1200"
-        elif ir_speed == '3':
-                ir_baud = "2400"
-        elif ir_speed == '4':
-                ir_baud = "4800"
-        elif ir_speed == '5':
-                ir_baud = "9600"
-        elif ir_speed == '6':
-                ir_baud = "19200"
-        else:
-                # unknown speed, continue to use 300 baud
-                ir_baud  = "300"
-                ir_speed = '0'
-
-        dbg_print (1, "IR-baud = %s" % ir_baud)
-
-
-
-        # Acknowledge choosen speed:
-        # [ACK]0[Z][Y] [CR] [LF]
-        #       Z is the baudrate, take the same value as ir_speed in the previous answer
-        #       Y can be 0 or 1. Value 0 sets the actual meterreading mode, Value 1 sets the programming mode
-        #
-
-        ir_command='\x06' + '0'+ ir_speed + '0\x0D\x0A'
-        ser.write(ir_command.encode('utf-8'))
-        ser.flush()
-        dbg_print(1, "Sent: <ACK>" + '0' + ir_speed + "0")
-
-        ser.baudrate = ir_baud    
-         # Wait for data
-
-        ir_buffer = ''
-        ir_lines_index = 0
-        ir_lines = []
-
-        ETX = False
-
-        while not ETX:
-                ir_buffer = str(ser.readline(), "utf-8")
-                if '\x060' in ir_buffer:
-                        ir_buffer = str(ser.readline(), "utf-8")
-                if ir_lines_index == 0:
-                        ir_buffer = ir_buffer.lstrip('\x02')
-                ir_lines.extend(ir_buffer.strip().split('\r\n'))
-                ir_lines_index = ir_lines_index + 1
-                if '!' in ir_buffer:
-                        ETX = True
-
-        dbg_print (1, "Datatransfer complete.")
-        dbg_print (1, "Number of received elements: %d" % len(ir_lines))
-        dbg_print (1, "Array of received elements: ")
-        if (print_debug > 0):
-                pprint (ir_lines)
-
-        # Close port and show status
-        ser.close()
-
-        power_timestamp=datetime.datetime.strftime(datetime.datetime.today(), "%Y-%m-%d %H:%M:%S" )
-        dbg_print (1, "Telegram ontvangen op: %s" % power_timestamp)
-
-        current_readings = MeterReadings(ir_lines)
-
-        return current_readings
-
-def dump_previous_readings(instance):
-        try:
-                state = open(state_file, "wb")
-                pickler = pickle.Pickler(state)
-                pickler.dump(instance)
-        except:
-                # Nothing to do here
-                print("failed to dump readings to state file")
-                return False
-        return True
-
-def get_previous_readings():
-        try:
-                state = open(state_file, "rb")
-                unpickler = pickle.Unpickler(state)
-                readings = unpickler.load()
-        except:
-                # nothing to do here
-                readings = None
-                print("Failed to read previous readings from state file: is this the first time we are running?")
-
+            readings = vars(LegacyStateUnpickler(io.BytesIO(data)).load())
+        timestamp = readings["time"]
+        if type(timestamp) not in (int, float) or not math.isfinite(timestamp) or timestamp <= 0:
+            raise ValueError("Invalid reading timestamp")
+        if readings["serial"] is not None and not isinstance(readings["serial"], str):
+            raise ValueError("Invalid meter serial")
+        for field in ("total_usage", "total_return"):
+            if type(readings[field]) is not int or not 0 <= readings[field] < 10**35:
+                raise ValueError("Invalid energy counter")
         return readings
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError, TypeError, KeyError, OverflowError, EOFError,
+            AttributeError, RecursionError, pickle.UnpicklingError) as exc:
+        LOG.warning("Cannot load baseline from %s: %s", path, exc)
+        return None
 
-def read_meter():
-        # limit excution time for the meter reading to 30 seconds.
-        # this will avoid hangings when a read fails
-        timeout_timer = Timer(30, _thread.interrupt_main)
 
+def save_baseline(path, readings):
+    temp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", dir=Path(path).parent,
+                                         prefix=".me162-", delete=False) as state:
+            temp_path = state.name
+            json.dump(readings, state)
+            state.flush()
+            os.fsync(state.fileno())
+        os.replace(temp_path, path)
+        temp_path = None
+    except OSError as exc:
+        LOG.warning("Cannot save baseline to %s: %s", path, exc)
+    finally:
+        if temp_path is not None:
+            try:
+                os.unlink(temp_path)
+            except OSError as exc:
+                LOG.warning("Cannot remove temporary state file %s: %s", temp_path, exc)
+
+
+def make_payload(current, previous):
+    payload = {field: current[field] / 1000 for field in ENERGY_FIELDS.values()}
+    payload.update(consumption=0, production=0)
+    if previous is None or current["serial"] != previous["serial"]:
+        return payload
+
+    interval = current["time"] - previous["time"]
+    imported = current["total_usage"] - previous["total_usage"]
+    exported = current["total_return"] - previous["total_return"]
+    if interval > 0 and imported >= 0 and exported >= 0:
+        payload["consumption"] = int(imported / interval * 3600) / 1000
+        payload["production"] = int(exported / interval * 3600) / 1000
+    return payload
+
+
+def check_mqtt_result(result):
+    if result != mqtt.MQTT_ERR_SUCCESS:
+        raise MQTTError(mqtt.error_string(result))
+
+
+def run_mqtt_loop(client, deadline, phase):
+    remaining = time_remaining(deadline)
+    if not remaining:
+        raise MQTTError(f"Timed out waiting for {phase}")
+    check_mqtt_result(client.loop(timeout=remaining))
+
+
+def publish(config, payload):
+    options = {"client_id": config.client_name, "protocol": mqtt.MQTTv311}
+    if hasattr(mqtt, "CallbackAPIVersion"):
+        options["callback_api_version"] = mqtt.CallbackAPIVersion.VERSION2
+    client = mqtt.Client(**options)
+    if config.broker_use_userpass:
+        client.username_pw_set(config.broker_u, config.broker_p)
+
+    connection_result = None
+
+    def on_connect(client, userdata, flags, reason_code, properties=None):
+        nonlocal connection_result
+        connection_result = reason_code
+
+    client.on_connect = on_connect
+    try:
+        deadline = time.monotonic() + MQTT_TIMEOUT
+        check_mqtt_result(client.connect(config.broker_address, port=config.broker_port))
+        while connection_result is None:
+            run_mqtt_loop(client, deadline, "broker connection")
+        if connection_result != 0:
+            raise MQTTError(f"Broker rejected connection ({connection_result})")
+
+        deadline = time.monotonic() + MQTT_TIMEOUT
+        message = client.publish(config.msg_prefix + "readings", json.dumps(payload), qos=1)
+        check_mqtt_result(message.rc)
+        while not message.is_published():
+            run_mqtt_loop(client, deadline, "publish acknowledgement")
+    finally:
+        # Close the socket even if a queued DISCONNECT cannot be sent.
+        sock = client.socket()
         try:
-                timeout_timer.start()
-                result = do_read_meter()
-        except KeyboardInterrupt:
-                result = None
-                dbg_print(0, "Meter Reading failed at ", datetime.datetime.strftime(datetime.datetime.today(), "%Y-%m-%d %H:%M:%S"), "will continue")
+            client.disconnect()
         finally:
-                timeout_timer.cancel()
-        return result
+            if sock is not None:
+                sock.close()
 
-def do_work():
-        current_readings = read_meter()
-        if current_readings is not None:
-                dbg_print(1, "Process new readings")
-                previous_readings = get_previous_readings()
-                if broker_use_userpass == True:
-                        client.username_pw_set(broker_u, broker_p)
-                try:
-                        client.loop_start()
-                        client.connect(broker_address)
-                except:
-                        dbg_print(1,"connection failed - timeout")  
-                        return                      
-                
-                dbg_print(2,"mqtt connection started")
-                a= 0
-                while 1:
-                        a += 1
-                        if client.connected_flag == True:
-                                dbg_print(2,"connection successful")
-                                json_resp = {}
-                                if previous_readings is not None:
 
-                                        # We need the previous reading to calulate actual consumption and production
-                                        # so if we do not yet have previous readings we skip the mqtt update for consumtion/ production
+def poll(config, previous):
+    try:
+        current = read_meter(config)
+    except (OSError, termios.error, MeterError) as exc:
+        LOG.warning("Meter read failed: %s", exc)
+        return previous
+    try:
+        payload = make_payload(current, previous)
+        LOG.debug("Meter payload %s", payload)
+        publish(config, payload)
+    except (OSError, MQTTError) as exc:
+        LOG.warning("MQTT publish failed: %s", exc)
+        return previous
+    save_baseline(config.state_file, current)
+    LOG.info("Broker acknowledged meter reading")
+    return current
 
-                                        dbg_print(1, "Previous readings found,  update mqtt")
-
-                                        interval = current_readings.time - previous_readings.time
-                                        consumption = int((current_readings.total_usage - previous_readings.total_usage) / interval * 3600)
-                                        production = int((current_readings.total_return - current_readings.total_return) / interval * 3600)
-
-                                        json_resp["usage1"] = current_readings.usage1/1000
-                                        json_resp["usage2"] = current_readings.usage2/1000
-                                        json_resp["return1"] = current_readings.return1/1000
-                                        json_resp["return2"] = current_readings.return2/1000
-                                        json_resp["total_usage"] = current_readings.total_usage/1000
-                                        json_resp["total_return"] = current_readings.total_return/1000
-                                        json_resp["consumption"] = consumption/1000
-                                        json_resp["production"] = production/1000
-                                else:
-                                        json_resp["usage1"] = current_readings.usage1/1000
-                                        json_resp["usage2"] = current_readings.usage2/1000
-                                        json_resp["return1"] = current_readings.return1/1000
-                                        json_resp["return2"] = current_readings.return2/1000
-                                        json_resp["total_usage"] = current_readings.total_usage/1000
-                                        json_resp["total_return"] = current_readings.total_return/1000
-                                        json_resp["consumption"] = 0
-                                        json_resp["production"] = 0
-
-                                        dbg_print(1, "No previous readings found, cannot post production/ consumption message")
-                                json_string = json.dumps(json_resp)
-                                client.publish(msg_prefix + "readings",json_string)
-                                client.disconnect()
-                                client.connected_flag = False
-                                client.loop_stop()
-                                dbg_print(1,"connection closed")
-                                break
-                        else:
-                                time.sleep(1.5)
-                                dbg_print(1,"waiting for connection")
-
-                        if a > 5:
-                                dbg_print(1,"connection timed out")
-                                client.loop_stop()
-                                break
-                if dump_previous_readings(current_readings):
-                        dbg_print(1, "dumped readings to state file")
-                
 
 def main():
-        while 1:
-                start_time = time.time()
-                do_work()
-                time_left = start_time + update_interval - time.time()
-                if time_left > 0:
-                        dbg_print(1, "sleeping for %d seconds" % time_left)
-                        time.sleep(time_left)
-                else:
-                        dbg_print(1, "Interval already expired, start next reading")
+    try:
+        config = load_config()
+    except (OSError, ValueError, SyntaxError) as exc:
+        LOG.error("Cannot load %s: %s", CONFIG_FILE, exc)
+        return 1
+    level = logging.WARNING if config.print_debug <= 0 else logging.INFO
+    if config.print_debug >= 2:
+        level = logging.DEBUG
+    logging.basicConfig(level=level, format="%(levelname)s %(message)s")
 
-if __name__ == '__main__':
-        main()
+    previous = load_baseline(config.state_file)
+    try:
+        while True:
+            next_poll = time.monotonic() + config.update_interval
+            previous = poll(config, previous)
+            time.sleep(time_remaining(next_poll))
+    except KeyboardInterrupt:
+        return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

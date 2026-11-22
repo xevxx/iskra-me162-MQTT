@@ -1,11 +1,12 @@
 [Unit]
-Description=ISKRA ME162 reader for Domoticz
-After=basic.target
+Description=ISKRA ME162 MQTT reader
+After=network.target
 
 [Service]
 Type=simple
 ExecStart=/usr/local/bin/iskra-me162
-Restart=on-abort
+Restart=on-failure
+RestartSec=5s
 StandardOutput=journal
 StandardError=journal
 
